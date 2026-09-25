@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build camera_test",
+      "type": "shell",
+      "command": "cmake -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)",
+      "options": {
+        "cwd": "${workspaceFolder}/camera_test"
+      },
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "build homework",
+      "type": "shell",
+      "command": "mkdir -p logs && cmake -B build -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j$(nproc)",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    }
+  ]
+}

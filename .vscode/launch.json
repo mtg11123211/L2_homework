@@ -1,0 +1,53 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug camera_test",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/camera_test/build/camera_test",
+      "cwd": "${workspaceFolder}/camera_test",
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "为 gdb 启用整齐打印",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build camera_test"
+    },
+    {
+      "name": "Debug main (作业二 YOLO)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/main",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "为 gdb 启用整齐打印",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build homework"
+    },
+    {
+      "name": "Debug opencv (附加作业 AprilTag)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/opencv",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "为 gdb 启用整齐打印",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "preLaunchTask": "build homework"
+    }
+  ]
+}

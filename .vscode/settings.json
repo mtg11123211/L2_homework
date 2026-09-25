@@ -1,0 +1,9 @@
+{
+  "cmake.configureOnOpen": true,
+  "cmake.buildDirectory": "${sourceDir}/build",
+  "C_Cpp.default.cppStandard": "c++17",
+  "C_Cpp.default.compilerPath": "/usr/bin/g++",
+  "files.associations": {
+    "*.hpp": "cpp"
+  }
+}

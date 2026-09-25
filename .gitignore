@@ -1,0 +1,19 @@
+# 编译产物
+build/
+camera_test/build/
+offline/build/
+
+# 运行日志与离线测试输出图
+logs/
+offline_tag_result.jpg
+offline_yolo_result.jpg
+
+# PDF 提取中间产物（非作业内容）
+assets/pdf_extract/
+
+# 个人现场调试手册（不提交）
+现场调试与代码讲解手册.md
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db/
