@@ -18,6 +18,8 @@
 #include <iostream>
 #include <stdexcept>  // std::runtime_error：构造失败时抛出，强制上层处理
 #include <string>
+#include <algorithm>  // std::max/std::min：白平衡目标值夹紧到相机允许范围
+#include <filesystem>  // 诊断对照图输出目录
 #include <unordered_map>  // Bayer 相位类型 -> OpenCV 转换码的映射表
 
 // 海康机器视觉 SDK 主头文件。只在本 .cpp 中包含（头文件不暴露 SDK 细节）。
@@ -47,8 +49,11 @@ void check(int ret, const char * what)
 // Bayer 有 GR/RG/GB/BG 四种起始相位，必须和相机实际输出一一对应，
 // 用哈希表查表比写四层 if-else 清晰，时间复杂度 O(1)。
 const std::unordered_map<MvGvspPixelType, cv::ColorConversionCodes> kBayerMap = {
+  // 实测：本机（MV-CS016）固件枚举为 BayerRG8，但 CFA 实际排列对应 OpenCV 的
+  // GR 约定——用 RG2BGR 白纸整体偏蓝、用 GR2BGR 呈中性灰（debug 四相位对照确认）。
+  // 海康 Bayer 命名与 OpenCV 差一位，故 RG8 这里映射到 COLOR_BayerGR2BGR。
+  {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerGR2BGR},
   {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2BGR},
-  {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2BGR},
   {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2BGR},
   {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2BGR},
 };
@@ -59,6 +64,18 @@ cv::Mat toBgr(const MV_FRAME_OUT & raw)
   // stFrameInfo 里带有这一帧的宽、高、像素格式（由相机端决定）。
   const int width = static_cast<int>(raw.stFrameInfo.nWidth);
   const int height = static_cast<int>(raw.stFrameInfo.nHeight);
+
+  // 一次性打印真实像素格式：用于确认 Bayer 相位。颜色整体红蓝对调时，
+  // 说明这里上报的相位与实际不符，需要改 kBayerMap 的映射（而不是白平衡）。
+  static bool printed_pixel_type = false;
+  if (!printed_pixel_type) {
+    std::cout << "Camera pixel type = 0x" << std::hex
+              << static_cast<unsigned int>(raw.stFrameInfo.enPixelType) << std::dec
+              << " (Mono8=0x01080001, BayerGR8=0x01080008, BayerRG8=0x01080009,"
+                                                 " BayerGB8=0x0108000A, BayerBG8=0x0108000B)"
+              << std::endl;
+    printed_pixel_type = true;
+  }
 
   // 【零拷贝的关键】cv::Mat 构造函数的这个重载不分配新内存，它只创建一个
   // 图像"头部"，data 指针直接指向 SDK 内部缓冲区 pBufAddr：
@@ -78,10 +95,59 @@ cv::Mat toBgr(const MV_FRAME_OUT & raw)
     // cvtColor 输出尺寸/通道数与输入不同，OpenCV 内部为 bgr 重新分配内存，
     // 因此转换结束后 bgr 已经不再指向 SDK 缓冲区，可以安全带走。
     cv::cvtColor(mono, bgr, it->second);
+
+    // ---- 软件压绿：硬件 Green 白平衡对本机输出无效，白纸实测 G 高约 10% ----
+    // 对解码后的 BGR 用三通道查找表，只把 G 通道乘 kOutGreenScale（一次性建好）。
+    constexpr float kOutGreenScale = 0.93f;  // 现场实测白纸 B/R≈82、G≈88 → 88×0.93≈82 配平
+    static cv::Mat green_lut = [] {
+      cv::Mat lut(1, 256, CV_8UC3);
+      for (int i = 0; i < 256; ++i) {
+        int g = static_cast<int>(i * kOutGreenScale);
+        lut.at<cv::Vec3b>(0, i) = cv::Vec3b(cv::saturate_cast<uchar>(i),
+                                            cv::saturate_cast<uchar>(g),
+                                            cv::saturate_cast<uchar>(i));
+      }
+      return lut;
+    }();
+    cv::LUT(bgr, green_lut, bgr);
+
+    // ---- 一次性诊断（首帧）：把同一帧用 4 种 Bayer 相位各转一张存盘 -------
+    // 白平衡中性后画面仍整体罩色时，看 debug/ 下哪张白纸呈中性灰，
+    // 那张对应的相位才是正确的，改 kBayerMap 一行即可。
+    static bool dumped = false;
+    if (!dumped) {
+      std::error_code ec;
+      std::filesystem::create_directories("debug", ec);
+      cv::imwrite("debug/00_raw_bayer.png", mono);
+      cv::Mat cand;
+      const struct { const char * name; cv::ColorConversionCodes code; } phases[] = {
+        {"01_GR", cv::COLOR_BayerGR2BGR}, {"02_RG", cv::COLOR_BayerRG2BGR},
+        {"03_GB", cv::COLOR_BayerGB2BGR}, {"04_BG", cv::COLOR_BayerBG2BGR}};
+      for (const auto & p : phases) {
+        cv::cvtColor(mono, cand, p.code);
+        cv::imwrite(std::string("debug/") + p.name + ".png", cand);
+      }
+      // 中心 200x200 ROI 的 B/G/R 均值：白纸应三者接近；B 明显高=偏蓝。
+      int s = 200;
+      cv::Rect roi(std::max(0, width / 2 - s / 2), std::max(0, height / 2 - s / 2), s, s);
+      cv::Scalar m = cv::mean(bgr(roi));
+      std::cout << "[Camera] center ROI mean  B=" << m[0] << " G=" << m[1] << " R=" << m[2]
+                << "  (白纸时三者应接近；诊断图已存 debug/00~04)" << std::endl;
+      dumped = true;
+    }
   } else if (raw.stFrameInfo.enPixelType == PixelType_Gvsp_Mono8) {
     // 黑白相机输出 Mono8：没有色彩信息，复制成三通道即可（后续 YOLO 接口
     // 统一要 3 通道图），三个通道值相同，显示为灰度。
     cv::cvtColor(mono, bgr, cv::COLOR_GRAY2BGR);
+  } else if (raw.stFrameInfo.enPixelType == PixelType_Gvsp_BGR8_Packed) {
+    // 兜底模式：相机固件直接输出已做 demosaic+颜色校正的 BGR8。
+    // Mat 零拷贝包住后 clone 一份独立内存再返回（不能带走 SDK 缓冲区）。
+    cv::Mat packed(cv::Size(width, height), CV_8UC3, raw.pBufAddr);
+    bgr = packed.clone();
+  } else if (raw.stFrameInfo.enPixelType == PixelType_Gvsp_RGB8_Packed) {
+    // 相机直出 RGB8：转成 OpenCV 使用的 BGR 序。
+    cv::Mat packed(cv::Size(width, height), CV_8UC3, raw.pBufAddr);
+    cv::cvtColor(packed, bgr, cv::COLOR_RGB2BGR);
   } else {
     // 既不是四种 Bayer 也不是 Mono8（例如相机被设成了 YUV/RGB packed 格式）。
     // 直接 std::map::at 会抛难懂的 out_of_range，这里给出带像素类型值的明确
@@ -129,18 +195,20 @@ Camera::Camera() : handle_(nullptr)  // 先置空，万一中途抛异常，析�
   }
 
   // ---- 第 4 步：配置成像参数（GenICam 标准节点，名字可在 MVS 客户端查）----
-  // 白平衡：设为连续自动。注意正式打装甲板时为了颜色稳定通常会改成手动，
-  // 这里与 example.cpp 保持一致，作业重点不在调参。
-  MV_CC_SetEnumValue(handle_, "BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_CONTINUOUS);
+  // 白平衡放在"开始取流之后"做：先触发相机一键自动白平衡（ONCE），
+  // 让它对着真实场景统计出中性 R/G/B，再读回、轻微偏红并锁死。
+  // 取流前相机没有图像统计，ONCE 不生效（这是之前设了没效果的原因）。
+
   // 曝光切手动，否则自动曝光会让灯条一会儿过曝一会儿暗，无法稳定识别。
   MV_CC_SetEnumValue(handle_, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
   // 增益也切手动，再给固定值，避免噪声随增益飘。
   MV_CC_SetEnumValue(handle_, "GainAuto", MV_GAIN_MODE_OFF);
-  // 曝光时间 10000 微秒 = 10 ms。注意与帧率的约束：曝光时间 × 帧率 < 1 秒，
-  // 10ms × 60fps = 0.6 < 1，合法。现场画面暗调大、拖影调小，改完需重编译。
-  MV_CC_SetFloatValue(handle_, "ExposureTime", 10000.0f);
-  MV_CC_SetFloatValue(handle_, "Gain", 20.0f);  // 模拟增益 20，单位 dB，越大噪点越多
-  MV_CC_SetFrameRate(handle_, 60.0f);           // 采集帧率 60 fps
+  // 曝光时间（微秒）。约束：曝光(μs) × 帧率(fps) < 1,000,000。
+  // 现场要亮：20000μs=20ms，配 45fps → 20ms×45=0.9s 合法，亮度是原 10ms 的两倍。
+  // 运动模糊敏感时降到 5000μs、帧率提回 60、增益加到 25dB。改完需重编译。
+  MV_CC_SetFloatValue(handle_, "ExposureTime", 20000.0f);
+  MV_CC_SetFloatValue(handle_, "Gain", 20.0f);  // 模拟增益，单位 dB，越大噪点越多
+  MV_CC_SetFrameRate(handle_, 45.0f);           // 采集帧率 45 fps（配合 20ms 长曝光）
 
   // ---- 第 5 步：开始取流 -----------------------------------------------
   // 同样做失败回滚：StartGrabbing 失败时，设备处于已打开状态，
@@ -153,6 +221,33 @@ Camera::Camera() : handle_(nullptr)  // 先置空，万一中途抛异常，析�
     handle_ = nullptr;
     throw;
   }
+
+  // ---- 第 6 步：固化白平衡（开物馆灯光，2026-09-26 对白纸标定）-----------
+  // 开机直接下发固定值，不再做 ONCE 自动标定，启动无需找纸、颜色稳定可复现。
+  // 重新标定（换灯光场地时）：把本块临时换成 BalanceWhiteAuto=ONCE + sleep 2s
+  // 对白纸跑一次，抄打印的 R/B 值替换下面两个常量（git 历史里有 ONCE 版本）。
+  // 注意：该机型硬件 Green 增益对最终输出无效（demosaic 会重建绿色通道），
+  // 残余约 10% 偏绿在 toBgr() 里用软件 kOutGreenScale 压掉，此处不动 G。
+  constexpr unsigned int kWbRed = 1887;   // 自动标定 1685 × 1.12（宁红）
+  constexpr unsigned int kWbBlue = 1843;  // 自动标定 1941 × 0.95（压蓝）
+  if (MV_CC_SetEnumValue(handle_, "BalanceWhiteAuto", MV_BALANCEWHITE_AUTO_OFF) != MV_OK) {
+    std::cerr << "[Camera] warn: BalanceWhiteAuto OFF failed, ignored" << std::endl;
+  }
+  // 固定值夹紧到该通道允许范围后下发，换同型号相机也不会越界。
+  auto safe_set = [this](unsigned int value,
+                         int (*getter)(void *, MVCC_INTVALUE *),
+                         int (*setter)(void *, unsigned int), const char * name) {
+    MVCC_INTVALUE range{};
+    unsigned int target = value;
+    if (getter(handle_, &range) == MV_OK && range.nMax > 0) {
+      target = std::max(range.nMin, std::min(range.nMax, target));
+    }
+    int rc = setter(handle_, target);
+    std::cout << "[Camera] WB " << name << " = " << target << ", ret=" << rc << std::endl;
+  };
+  safe_set(kWbRed, MV_CC_GetBalanceRatioRed, MV_CC_SetBalanceRatioRed, "R");
+  safe_set(kWbBlue, MV_CC_GetBalanceRatioBlue, MV_CC_SetBalanceRatioBlue, "B");
+
   // 走到这里：相机已在后台持续往 SDK 缓冲池送帧，构造完成。
 }
 
@@ -180,7 +275,7 @@ cv::Mat Camera::read()
   raw.pBufAddr = nullptr;
 
   // 从 SDK 内部缓冲池取一帧，第 3 个参数是超时时间 100ms：
-  // 60fps 下每 16.7ms 就有一帧，100ms 等不到说明取流异常（USB 掉线/被抢占）。
+  // 45fps 下约每 22ms 一帧，100ms 等不到说明取流异常（USB 掉线/被抢占）。
   // 这里不抛异常而返回空 Mat：偶发丢帧在实时系统里是正常的，上层重试即可。
   if (MV_CC_GetImageBuffer(handle_, &raw, 100) != MV_OK) {
     return cv::Mat();
