@@ -19,7 +19,6 @@
 #include <stdexcept>  // std::runtime_error：构造失败时抛出，强制上层处理
 #include <string>
 #include <algorithm>  // std::max/std::min：白平衡目标值夹紧到相机允许范围
-#include <filesystem>  // 诊断对照图输出目录
 #include <unordered_map>  // Bayer 相位类型 -> OpenCV 转换码的映射表
 
 // 海康机器视觉 SDK 主头文件。只在本 .cpp 中包含（头文件不暴露 SDK 细节）。
@@ -65,18 +64,6 @@ cv::Mat toBgr(const MV_FRAME_OUT & raw)
   const int width = static_cast<int>(raw.stFrameInfo.nWidth);
   const int height = static_cast<int>(raw.stFrameInfo.nHeight);
 
-  // 一次性打印真实像素格式：用于确认 Bayer 相位。颜色整体红蓝对调时，
-  // 说明这里上报的相位与实际不符，需要改 kBayerMap 的映射（而不是白平衡）。
-  static bool printed_pixel_type = false;
-  if (!printed_pixel_type) {
-    std::cout << "Camera pixel type = 0x" << std::hex
-              << static_cast<unsigned int>(raw.stFrameInfo.enPixelType) << std::dec
-              << " (Mono8=0x01080001, BayerGR8=0x01080008, BayerRG8=0x01080009,"
-                                                 " BayerGB8=0x0108000A, BayerBG8=0x0108000B)"
-              << std::endl;
-    printed_pixel_type = true;
-  }
-
   // 【零拷贝的关键】cv::Mat 构造函数的这个重载不分配新内存，它只创建一个
   // 图像"头部"，data 指针直接指向 SDK 内部缓冲区 pBufAddr：
   //   Mat(尺寸, 类型 CV_8UC1 单通道8位, 外部数据指针)
@@ -110,31 +97,6 @@ cv::Mat toBgr(const MV_FRAME_OUT & raw)
       return lut;
     }();
     cv::LUT(bgr, green_lut, bgr);
-
-    // ---- 一次性诊断（首帧）：把同一帧用 4 种 Bayer 相位各转一张存盘 -------
-    // 白平衡中性后画面仍整体罩色时，看 debug/ 下哪张白纸呈中性灰，
-    // 那张对应的相位才是正确的，改 kBayerMap 一行即可。
-    static bool dumped = false;
-    if (!dumped) {
-      std::error_code ec;
-      std::filesystem::create_directories("debug", ec);
-      cv::imwrite("debug/00_raw_bayer.png", mono);
-      cv::Mat cand;
-      const struct { const char * name; cv::ColorConversionCodes code; } phases[] = {
-        {"01_GR", cv::COLOR_BayerGR2BGR}, {"02_RG", cv::COLOR_BayerRG2BGR},
-        {"03_GB", cv::COLOR_BayerGB2BGR}, {"04_BG", cv::COLOR_BayerBG2BGR}};
-      for (const auto & p : phases) {
-        cv::cvtColor(mono, cand, p.code);
-        cv::imwrite(std::string("debug/") + p.name + ".png", cand);
-      }
-      // 中心 200x200 ROI 的 B/G/R 均值：白纸应三者接近；B 明显高=偏蓝。
-      int s = 200;
-      cv::Rect roi(std::max(0, width / 2 - s / 2), std::max(0, height / 2 - s / 2), s, s);
-      cv::Scalar m = cv::mean(bgr(roi));
-      std::cout << "[Camera] center ROI mean  B=" << m[0] << " G=" << m[1] << " R=" << m[2]
-                << "  (白纸时三者应接近；诊断图已存 debug/00~04)" << std::endl;
-      dumped = true;
-    }
   } else if (raw.stFrameInfo.enPixelType == PixelType_Gvsp_Mono8) {
     // 黑白相机输出 Mono8：没有色彩信息，复制成三通道即可（后续 YOLO 接口
     // 统一要 3 通道图），三个通道值相同，显示为灰度。
@@ -195,9 +157,7 @@ Camera::Camera() : handle_(nullptr)  // 先置空，万一中途抛异常，析�
   }
 
   // ---- 第 4 步：配置成像参数（GenICam 标准节点，名字可在 MVS 客户端查）----
-  // 白平衡放在"开始取流之后"做：先触发相机一键自动白平衡（ONCE），
-  // 让它对着真实场景统计出中性 R/G/B，再读回、轻微偏红并锁死。
-  // 取流前相机没有图像统计，ONCE 不生效（这是之前设了没效果的原因）。
+  // 曝光/增益切手动，避免灯条一会儿过曝一会儿暗；白平衡在第 6 步取流后固化。
 
   // 曝光切手动，否则自动曝光会让灯条一会儿过曝一会儿暗，无法稳定识别。
   MV_CC_SetEnumValue(handle_, "ExposureAuto", MV_EXPOSURE_AUTO_MODE_OFF);
