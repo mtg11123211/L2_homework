@@ -37,14 +37,14 @@ Pipeline::Pipeline(std::unique_ptr<FrameSource> source, PipelineConfig config)
 
 Pipeline::~Pipeline()
 {
-    // Wake up every worker blocked in pop(); must happen before join().
+    // 唤醒所有阻塞在 pop() 上的 worker；必须在 join() 之前执行。
     queue_.close();
-    // Stop the upstream first...
+    // 先等上游的 producer 结束……
     if (producer_.joinable())
     {
         producer_.join();
     }
-    // ...then wait while workers finish the frames already in the queue.
+    // ……再等 worker 把队列中已有的帧处理完。
     for (auto &worker : workers_)
     {
         if (worker.joinable())
@@ -95,7 +95,7 @@ void Pipeline::producerLoop()
         statistics_.onProduced();
         logLine(std::cout, "[Producer] frame " + std::to_string(frame.id));
 
-        // The producer no longer needs the frame: transfer ownership in.
+        // producer 不再需要这个帧：直接把所有权转交进队列。
         queue_.push(std::move(frame));
     }
     queue_.close();

@@ -55,8 +55,7 @@ bool ImageSequenceSource::next(Frame &frame)
     frame.id = static_cast<int>(next_index_++);
     frame.expected_checksum = checksum(buffer_);
 
-    // Deep copy: the frame must own its pixels, because the camera-style
-    // buffer is overwritten on the next call to next().
+    // 深拷贝：帧必须拥有自己的像素，因为相机式缓冲区在下一次调用 next() 时会被覆盖。
     frame.image = buffer_.clone();
 
     if (producer_delay_ms_ > 0)

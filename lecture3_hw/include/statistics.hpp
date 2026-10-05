@@ -20,8 +20,8 @@ public:
     StatisticsSnapshot snapshot() const;
 
 private:
-    // Guards every read and write of the four counters below.
-    // mutable because snapshot() is const but still has to lock.
+    // 保护下面四个计数器的所有读写。
+    // 声明为 mutable 是因为 snapshot() 是 const 函数但仍需要加锁。
     mutable std::mutex mutex_;
     int produced_ = 0;
     int processed_ = 0;
