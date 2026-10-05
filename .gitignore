@@ -3,6 +3,9 @@ build/
 camera_test/build/
 offline/build/
 
+# L3 流水线运行输出
+lecture3_hw/output/
+
 # 运行日志与离线测试输出图
 logs/
 offline_tag_result.jpg
